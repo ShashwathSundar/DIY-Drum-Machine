@@ -6,24 +6,32 @@
 #define editBeatLen 2
 #define editNotes 3
 
+#define maxBeatLen 16
+#define notesPerBeat 12
+#define maxScreenBrightness 8
+#define minTempo 30
+#define maxTempo 240
+
 int BPM=120; //tempo
 int newbpm=BPM; //temp bpm memory for manual entry
 byte mode=home;
 bool tick=false;
-byte bankA[192]={0};
-byte bankB[192]={0};
+byte bankA[maxBeatLen * notesPerBeat]={0};
+byte bankB[maxBeatLen * notesPerBeat]={0};
 byte beatnotes=0; //current beat for editing notes
 bool altBank=false;
 bool pause=false;
-byte beatLen=16; // beat length
+byte muteMask=0xff;
+byte beatLen=maxBeatLen; // beat length
 byte newblen=0; //temp beat length for manual entry
 byte curChannel=0; //current channel being edited
 byte stepCount=0; //step to be played next by the sequencer
 
-byte screenBrightness=1;
-char customKey='m';
-const byte ROWS = 5; //four rows
-const byte COLS = 5; //four columns
+byte screenBrightness=0;
+
+char customKey='m'; //default to home mode on boot
+const byte ROWS = 5;
+const byte COLS = 5;
 //define the cymbols on the buttons of the keypads
 char hexaKeys[ROWS][COLS] = {
   {'R','M','S','m','-'},
@@ -32,12 +40,13 @@ char hexaKeys[ROWS][COLS] = {
   {' ','7','8','9','n'},
   {' ','*','0','#','+'}
 };
-byte rowPins[ROWS] = {A4,A3,A2,A1,A0}; //connect to the row pinouts of the keypad 3;4;5;6;7
-byte colPins[COLS] = {2,3,4,5,6}; //connect to the column pinouts of the keypad 8;9;10;11;12
+byte rowPins[ROWS] = {A4,A3,A2,A1,A0}; //connect to the row pinouts of the keypad M3;M4;M5;M6;M7
+byte colPins[COLS] = {2,3,4,5,6}; //connect to the column pinouts of the keypad M8;M9;M10;M11;M12
 
 //initialize an instance of class NewKeypad
 Keypad customKeypad = Keypad( makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS); 
 
+//bitmaps for characters and numbers [4x5 matrix]
 byte cAB[5]={0b00110101,0b01010111,0b00110101,0b01010101,0b00110010};
 byte cCD[5]={0b00110110,0b01010001,0b01010001,0b01010001,0b00110110};
 byte cEF[5]={0b00010111,0b00010001,0b00110011,0b00010001,0b01110111};
@@ -53,66 +62,71 @@ byte c8[5]={0b0111,0b0101,0b0111,0b0101,0b0111};
 byte c9[5]={0b0100,0b0100,0b0111,0b0101,0b0111};
 byte c0[5]={0b0111,0b0101,0b0101,0b0101,0b0111};
 
-/*pin 12 is connected to the DataIn 
+/* display connection:
+ pin 12 is connected to the DataIn 
  pin 11 is connected to the CLK 
  pin 10 is connected to LOAD */
 LedControl lc=LedControl(12,11,10,2);
 
+//Interrupt service request:
 void blinkLED(void)
 { tick=!tick;
+
   if(tick && !pause){
-    //shift out step A5(PC5)-reset ; D8(PD7)-latch ; D7-DIN ; D9(PB1)-clock
+   
     byte val=0;
+    
+    //set step value based on the current bank selected:
     if(!altBank)
       val=bankA[stepCount];
     else
       val=bankB[stepCount];
       
+  //apply masking for mute and solo effect:
+      val&=muteMask;
+
+      //Shift register commections:: D8-latch ; D7-DIN ; D9-clock
+    //shift out LSB first
     for(byte i=0;i<8;i++)
       { 
-        //PORTB &= 0b11111110;  //set DIN to 0
-        //PORTB |= 1 & (val>>i); //set DIN to bit value
+        //set data bit:
         if(1&(val>>i))
           digitalWrite(7,HIGH);
         else
           digitalWrite(7,LOW);
-        //PORTB |= 0b00000010;  //set clock high
-        //PORTB &= 0b11111101;  //set clock low
-        digitalWrite(9,HIGH);
+          
+        //toggle clock to shift the bit
+        digitalWrite(9,HIGH); 
         digitalWrite(9,LOW);
         
         }
+        //toggle latch:
         digitalWrite(8,HIGH);
         digitalWrite(8,LOW);
         
-        //PORTD |= 0b10000000; //set latch high
-        //PORTD &= 0b01111111; //set latch low
-    
+    //increment step counter ; set to 0 on overflow
     stepCount+=1;
-    if(stepCount>=(beatLen*12))
+    if(stepCount>=(beatLen*notesPerBeat))
       {stepCount=0;
       }
   }
   else{
     //reset output
-    //PORTC |= 0b00100000; //set latch high
-    //PORTC &= 0b11011111; //set latch low
-    //PORTD |= 0b10000000; //set latch high
-    //PORTD &= 0b01111111; //set latch low
+    //shift out zero:
     for(byte i=0;i<8;i++)
       { 
-        //PORTB &= 0b11111110;  //set DIN to 0
-        //PORTB |= 1 & (val>>i); //set DIN to bit value
         digitalWrite(7,LOW);
-        //PORTB |= 0b00000010;  //set clock high
-        //PORTB &= 0b11111101;  //set clock low
+        //toggle clock
         digitalWrite(9,HIGH);
         digitalWrite(9,LOW);
         
         }
+    //toggle latch
     digitalWrite(8,HIGH);
     digitalWrite(8,LOW);
     }
+    
+    //LED for showing the clock ticks:
     digitalWrite(13, tick);
     
 }
@@ -279,44 +293,40 @@ void displayHome(){
   int noteSet=0;
   for (byte i=0;i<12;i++)
     if (!altBank)
-    noteSet |= (((bankA[beatnotes-12+i]>> curChannel) & 1) <<i); //get step for current beat; shift and mask for current channel; shift to note position ans set the noteSet bit;
+    noteSet |= (((bankA[beatnotes-notesPerBeat+i]>> curChannel) & 1) <<i); //get step for current beat; shift and mask for current channel; shift to note position ans set the noteSet bit;
     else
-    noteSet |= (((bankB[beatnotes-12+i]>> curChannel) & 1) <<i); //get step for current beat; shift and mask for current channel; shift to note position ans set the noteSet bit;
-    //Serial.println(noteSet,BIN);
+    noteSet |= (((bankB[beatnotes-notesPerBeat+i]>> curChannel) & 1) <<i); //get step for current beat; shift and mask for current channel; shift to note position ans set the noteSet bit;
+    
     noteSet= noteSet<<2;
+    
     lc.setRow(0,1,noteSet | 1); // OR bit mask just for display
     lc.setRow(1,1,noteSet>>8 | 0x80); //OR bit mask just for display
     lc.setRow(0,0,0b00000001); //just for display
     lc.setRow(1,0,0b10000000); //just for display
     
-  //lc.setRow(0,i,bankA[beatnotes-12+i]);
   displayChannel();
-  displayNum(1,beatnotes/12,true);
+  displayNum(1,beatnotes/notesPerBeat,true);
   }
  
 void setup(){
   Timer1.initialize(BPMtoDelay(BPM)); // microseconds
-  Timer1.attachInterrupt(blinkLED); // blinkLED to run every 0.15 seconds
-  pinMode(A5,OUTPUT);
+  Timer1.attachInterrupt(blinkLED);
+  //pin setup for shift register:
   pinMode(7,OUTPUT);
   pinMode(8,OUTPUT);
   pinMode(9,OUTPUT);
-  digitalWrite(A5,HIGH);
   digitalWrite(7,LOW);
   digitalWrite(8,LOW);
   digitalWrite(9,LOW);
+  
   lc.shutdown(0,false);
   lc.shutdown(1,false);
-  /* Set the brightness to a medium values */
-  lc.setIntensity(0,1);
-  lc.setIntensity(1,1);
+  /* Set the brightness to lowest value */
+  lc.setIntensity(0,0);
+  lc.setIntensity(1,0);
   /* and clear the display */
   lc.clearDisplay(0);
   lc.clearDisplay(1);
-  //Serial.begin(9600);
-  displayHome();
-  lc.setRow(0,1,0b01110000);
-    
     
 }
   
@@ -336,7 +346,7 @@ void loop(){
       break;
     case 'n' :  // edit notes for selected beat
       mode=editNotes;
-      beatnotes=12;
+      beatnotes=notesPerBeat;//first 12 notes OR first beat
       break;
     case 'S' :  // play pause
       pause=!pause;
@@ -483,6 +493,8 @@ void loop(){
           bankA[beatnotes-3] ^= 1<<curChannel;      //toggle 10th note of current beat for current channel
         else
           bankB[beatnotes-3] ^= 1<<curChannel;}
+      if(mode==home)                                //solo current channel
+        muteMask=1<<curChannel;
       break;
      case '0':
       if (mode==editNotes){
@@ -494,25 +506,25 @@ void loop(){
         newbpm=(newbpm*10)+0;
         if (mode==editBeatLen)
         newblen=(newblen*10)+0;
+      if(mode==home)
+        muteMask=0xff;                            //unmute all channels
      
       break;
      case '+':
-      if (mode==editTempo && BPM<240)
+      if (mode==editTempo && BPM<maxTempo)
         {BPM+=1;
-          //Serial.println(BPM);
           Timer1.setPeriod(BPMtoDelay(BPM));
             }
-      if (mode==editBeatLen && beatLen<16)
+      if (mode==editBeatLen && beatLen<maxBeatLen)
           beatLen+=1;
       if (mode==editNotes && beatnotes<192)
-        beatnotes+=12;
-      if(mode==home && screenBrightness<15)
+        beatnotes+=notesPerBeat;
+      if(mode==home && screenBrightness<maxScreenBrightness)
         screenBrightness+=1;
       break;
      case '-':
-      if (mode==editTempo && BPM>30)
+      if (mode==editTempo && BPM>minTempo)
         {BPM-=1;
-         // Serial.println(BPM);
           Timer1.setPeriod(BPMtoDelay(BPM));
             }
      if (mode==editBeatLen && beatLen>1)
@@ -529,19 +541,22 @@ void loop(){
         else
           bankB[beatnotes-1] ^= 1<<curChannel;}
       if (mode==editTempo)
-        {if (newbpm>29 && newbpm<241)
+        {if (newbpm>=minTempo && newbpm<=maxTempo)
           {BPM=newbpm;
           Serial.println(BPM);
           Timer1.setPeriod(BPMtoDelay(BPM));}
           newbpm=0;}
       if (mode==editBeatLen)
-        {if(newblen>0 && newblen<17)
+        {if(newblen>0 && newblen<=maxBeatLen)
           beatLen=newblen;
           newblen=0;}
+      if(mode==home)                                //toggle mute current channel
+        muteMask^=(1<<curChannel);
       break;
     }
         lc.setIntensity(0,screenBrightness);
         lc.setIntensity(1,screenBrightness);
+        //blank bottom 3 rows on both displays
         lc.setRow(0,0,0);
         lc.setRow(0,1,0);
         lc.setRow(0,2,0);
@@ -550,7 +565,11 @@ void loop(){
         lc.setRow(1,2,0);
     if(mode==home)
       {displayHome();
-      lc.setRow(0,1,0b01110000);
+      if(muteMask& (1<<curChannel))
+        lc.setRow(0,1,0b01110000);
+      else{
+        lc.setRow(0,1,0b01010000);
+        lc.setRow(0,0,0b01110000);}
         }
     if (mode==editBeatLen)
       { displayHome();
@@ -563,6 +582,6 @@ void loop(){
       {displayNotes();
         } 
   }
-  
+  //detect button press
   customKey = customKeypad.getKey();
 }
