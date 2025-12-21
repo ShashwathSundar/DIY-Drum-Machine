@@ -68,7 +68,7 @@ byte c0[5]={0b0111,0b0101,0b0101,0b0101,0b0111};
  pin 10 is connected to LOAD */
 LedControl lc=LedControl(12,11,10,2);
 
-//Interrupt service request:
+//Interrupt service routine:
 void blinkLED(void)
 { tick=!tick;
 
